@@ -13,33 +13,30 @@ By using a patch approach, you get the latest features (like MTP, Medusa, and Ea
 
 ## How to use
 
-We provide a simple Bash script that automatically clones the upstream repository, checks out the exact commit this patch was built for, and applies the optimizations.
+We provide a **Makefile** and a simple Bash script to automate everything. The process is fully logged to `patch-apply.log`.
 
-### 1. Run the Wrapper Script
-
-```bash
-chmod +x apply-turbo.sh
-./apply-turbo.sh
-```
-
-If successful, you will see a new directory called `llama.cpp-gfx906-turbo`.
-
-### 2. Build the Project
-
-Move into the new directory and build using CMake. The script will output these exact commands:
+### 1. Run Everything (Patch + Build)
 
 ```bash
-cd llama.cpp-gfx906-turbo
-mkdir build && cd build
-cmake .. -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906 -DGGML_HIP_GRAPHS=ON
-make -j llama-cli
+make all
 ```
 
-### 3. Run with Turbo3 and MTP
+### 2. Manual Steps
 
-```bash
-./bin/llama-cli -m your_model.gguf --mtp 1 --ctk turbo3 --ctv turbo3 -fa on ...
-```
+If you want more control, you can run the steps individually:
+
+*   **Apply the patch only:**
+    ```bash
+    make patch
+    ```
+*   **Build only (after patching):**
+    ```bash
+    make build
+    ```
+
+### Logging
+
+All output from Git (cloning, checking out, patching) is redirected to **`patch-apply.log`**. If something goes wrong, check this file first.
 
 ## Maintaining and Updating
 
@@ -47,7 +44,7 @@ This patch is tied to a specific upstream commit (`acd604fb277044e07c2bff01f4c16
 
 If you want to update to a newer upstream commit in the future:
 1. Change the `STABLE_COMMIT` variable in `apply-turbo.sh`.
-2. Run the script.
+2. Run `make patch`.
 3. If the script fails (because upstream code changed significantly), Git will generate `*.rej` files indicating which parts of the patch failed.
 4. Manually fix the `.rej` conflicts in the `llama.cpp-gfx906-turbo` directory.
 5. Create a new patch using `git diff > turbo-gfx906-mtp.patch` and overwrite the old one.
