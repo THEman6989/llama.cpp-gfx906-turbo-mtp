@@ -1,3 +1,5 @@
+#include "common.cuh"
+#include "turbo-quant.cuh"
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
 
@@ -314,6 +316,12 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
+    } else if (dst->type == GGML_TYPE_TURBO3_0) {
+        ggml_cuda_op_set_rows_turbo3(ctx, dst);
+    } else if (dst->type == GGML_TYPE_TURBO4_0) {
+        ggml_cuda_op_set_rows_turbo4(ctx, dst);
+    } else if (dst->type == GGML_TYPE_TURBO2_0) {
+        ggml_cuda_op_set_rows_turbo2(ctx, dst);
     } else {
         GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
     }

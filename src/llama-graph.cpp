@@ -1971,14 +1971,25 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     k = ggml_permute(ctx0, k, 0, 2, 1, 3);
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
 
+    const bool is_turbo_k = k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0;
+    const bool is_turbo_v = v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0;
+
+    if (is_turbo_k) {
+        q = ggml_turbo_wht(ctx0, q, false);
+    }
+
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    const bool use_flash_attn = (cparams.flash_attn || is_turbo_k || is_turbo_v) && kq_b == nullptr;
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
         if (v_trans) {
             v = ggml_transpose(ctx0, v);
+        }
+
+        if (is_turbo_v) {
+            v = ggml_turbo_wht(ctx0, v, false);
         }
 
         // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
@@ -1993,6 +2004,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
+
+        if (is_turbo_v) {
+            cur = ggml_turbo_wht(ctx0, cur, true);
+        }
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);

@@ -61,7 +61,27 @@ file(GLOB   GGML_HEADERS_ROCM "../ggml-cuda/*.cuh")
 list(APPEND GGML_HEADERS_ROCM "../../include/ggml-cuda.h")
 
 file(GLOB   GGML_SOURCES_ROCM "../ggml-cuda/*.cu")
+
+# turbo-quant.cu: compile at -O1 to work around HIP compiler FWHT optimization bug on gfx906
+set_source_files_properties(../ggml-cuda/turbo-quant.cu PROPERTIES COMPILE_FLAGS "-O1")
+
+# GFX906-specific source files (AMD MI50/MI60 optimizations)
+file(GLOB SRCS "../ggml-cuda/gfx906/*.cu")
+message(STATUS "GFX906 .cu files found: ${SRCS}")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB SRCS "../ggml-cuda/gfx906/fused/*.cu")
+message(STATUS "GFX906 fused kernels found: ${SRCS}")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB SRCS "../ggml-cuda/gfx906/attention/*.cu")
+message(STATUS "GFX906 attention kernels found: ${SRCS}")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB SRCS "../ggml-cuda/gfx906/attention/instances/*.cu")
+message(STATUS "GFX906 attention instances found: ${SRCS}")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-tile*.cu")
+# Exclude Q8 instances if they're in root (moved to gfx906/)
+list(FILTER SRCS EXCLUDE REGEX ".*fattn-tile-q8.*")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-mma*.cu")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
@@ -81,6 +101,16 @@ else()
         ../ggml-cuda/template-instances/fattn-vec-instance-q8_0-q8_0.cu
         ../ggml-cuda/template-instances/fattn-vec-instance-bf16-bf16.cu)
 endif()
+
+# TurboQuant FA template instances (always compiled)
+file(GLOB SRCS "../ggml-cuda/template-instances/fattn-vec*turbo2*.cu")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB SRCS "../ggml-cuda/template-instances/fattn-vec*turbo3*.cu")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB SRCS "../ggml-cuda/template-instances/fattn-vec*turbo4*.cu")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB SRCS "../ggml-cuda/template-instances/fattn-vec*f16-q8_0*.cu")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
 
 ggml_add_backend_library(ggml-hip
                          ${GGML_HEADERS_ROCM}
@@ -112,6 +142,12 @@ endif()
 
 if (GGML_HIP_NO_VMM)
     add_compile_definitions(GGML_HIP_NO_VMM)
+endif()
+
+# GFX906 optimizations: enable if targeting gfx906 (MI50/MI60/Radeon VII)
+if (GGML_HIP_GFX906 OR CMAKE_HIP_ARCHITECTURES MATCHES "gfx906")
+    add_compile_definitions(GGML_HIP_GFX906)
+    message(STATUS "GFX906 optimizations enabled (warp-cooperative Q4_1 MMVQ)")
 endif()
 
 if (GGML_HIP_ROCWMMA_FATTN)

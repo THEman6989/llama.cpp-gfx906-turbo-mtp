@@ -6,6 +6,218 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+#include <unordered_map>
+
+// Forward declaration — defined further down after template instantiations.
+static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Persistent fp16 shadow cache for turbo3 KV
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static __global__ void k_turbo3_dequant_rows_f16(
+        const char * __restrict__ src, half * __restrict__ dst,
+        const int64_t ne0,
+        const int64_t row_start, const int64_t n_rows,
+        const size_t  src_nb1,   const size_t  src_nb2,
+        const int64_t dst_row_stride, const int64_t dst_head_stride) {
+
+    const float C[8] = {
+        -0.190685f, -0.117832f, -0.065717f, -0.021460f,
+         0.021460f,  0.065717f,  0.117832f,  0.190685f
+    };
+
+    const int64_t local_row = blockIdx.x;
+    const int64_t head      = blockIdx.y;
+    if (local_row >= n_rows) return;
+
+    const int64_t abs_row = row_start + local_row;
+    const char * src_row = src + head * src_nb2 + abs_row * src_nb1;
+
+    for (int j = threadIdx.x; j < ne0; j += blockDim.x) {
+        const int blk_idx  = j / QK_TURBO3;
+        const int j_in_blk = j % QK_TURBO3;
+        const block_turbo3_0 * blk = (const block_turbo3_0 *)src_row + blk_idx;
+
+        const float norm = __half2float(blk->norm);
+        const uint8_t low2 = (blk->qs[j_in_blk / 4] >> ((j_in_blk % 4) * 2)) & 0x3;
+        const uint8_t hi1  = (blk->signs[j_in_blk / 8] >> (j_in_blk % 8)) & 0x1;
+        const float val = C[low2 | (hi1 << 2)] * norm;
+
+        dst[head * dst_head_stride + abs_row * dst_row_stride + j] = __float2half(val);
+    }
+}
+
+static __global__ void k_turbo2_dequant_rows_f16(
+        const char * __restrict__ src, half * __restrict__ dst,
+        const int64_t ne0,
+        const int64_t row_start, const int64_t n_rows,
+        const size_t  src_nb1,   const size_t  src_nb2,
+        const int64_t dst_row_stride, const int64_t dst_head_stride) {
+
+    const float C[4] = {
+        -0.133462f, -0.039994f, 0.039994f, 0.133462f
+    };
+
+    const int64_t local_row = blockIdx.x;
+    const int64_t head      = blockIdx.y;
+    if (local_row >= n_rows) return;
+
+    const int64_t abs_row = row_start + local_row;
+    const char * src_row = src + head * src_nb2 + abs_row * src_nb1;
+
+    for (int j = threadIdx.x; j < ne0; j += blockDim.x) {
+        const int blk_idx  = j / QK_TURBO2;
+        const int j_in_blk = j % QK_TURBO2;
+        const block_turbo2_0 * blk = (const block_turbo2_0 *)src_row + blk_idx;
+
+        const float norm = __half2float(blk->norm);
+        const uint8_t idx = (blk->qs[j_in_blk / 4] >> ((j_in_blk % 4) * 2)) & 0x3;
+        const float val = C[idx] * norm;
+
+        dst[head * dst_head_stride + abs_row * dst_row_stride + j] = __float2half(val);
+    }
+}
+
+static __global__ void k_turbo4_dequant_rows_f16(
+        const char * __restrict__ src, half * __restrict__ dst,
+        const int64_t ne0,
+        const int64_t row_start, const int64_t n_rows,
+        const size_t  src_nb1,   const size_t  src_nb2,
+        const int64_t dst_row_stride, const int64_t dst_head_stride) {
+
+    const float C[8] = {
+        -0.190685f, -0.117832f, -0.065717f, -0.021460f,
+         0.021460f,  0.065717f,  0.117832f,  0.190685f
+    };
+
+    const int64_t local_row = blockIdx.x;
+    const int64_t head      = blockIdx.y;
+    if (local_row >= n_rows) return;
+
+    const int64_t abs_row = row_start + local_row;
+    const char * src_row = src + head * src_nb2 + abs_row * src_nb1;
+
+    for (int j = threadIdx.x; j < ne0; j += blockDim.x) {
+        const int blk_idx  = j / QK_TURBO4;
+        const int j_in_blk = j % QK_TURBO4;
+        const block_turbo4_0 * blk = (const block_turbo4_0 *)src_row + blk_idx;
+
+        const float norm = __half2float(blk->norm);
+
+        int bit_offset = j_in_blk * 3;
+        int byte_idx = bit_offset / 8;
+        int bit_pos = bit_offset % 8;
+        uint16_t raw = (uint16_t)blk->qs[byte_idx];
+        if (byte_idx + 1 < 48) raw |= (uint16_t)blk->qs[byte_idx + 1] << 8;
+        uint8_t idx = (uint8_t)((raw >> bit_pos) & 0x7);
+
+        float val = C[idx] * norm;
+
+        dst[head * dst_head_stride + abs_row * dst_row_stride + j] = __float2half(val);
+    }
+}
+
+struct turbo_fp16_shadow {
+    half *   buf       = nullptr;
+    int64_t  capacity  = 0;
+    int64_t  filled    = 0;
+    int64_t  ne0       = 0;
+    int64_t  ne2       = 0;
+    int64_t  ne3       = 0;      // stream dimension (ne[3]), 1 for single-slot
+    void *   src_data  = nullptr;
+};
+
+static std::unordered_map<void *, turbo_fp16_shadow> g_turbo_shadows;
+
+// Returns false if shadow buffer allocation fails (OOM) — caller should fall back to native path.
+static bool turbo_shadow_sync(
+        const ggml_tensor * T, turbo_fp16_shadow & sh,
+        ggml_tensor & T_f16, cudaStream_t stream) {
+
+    const int64_t ne0 = T->ne[0];
+    const int64_t ne1 = T->ne[1];
+    const int64_t ne2 = T->ne[2];
+    const int64_t ne3 = std::max(T->ne[3], (int64_t)1);  // stream dimension, 1 for single-slot
+
+    // Always re-dequant fully — contiguous layout requires consistent head stride = ne0*ne1
+    // which changes as ne1 grows, so incremental fill is not possible with contiguous layout.
+    const size_t sz = ne0 * ne1 * ne2 * ne3 * sizeof(half);
+    if (sh.capacity < ne1 || sh.ne0 != ne0 || sh.ne2 != ne2 || sh.ne3 != ne3 || sh.src_data != T->data) {
+        if (sh.buf) { CUDA_CHECK(cudaFree(sh.buf)); sh.buf = nullptr; }
+        cudaError_t err = cudaMalloc(&sh.buf, sz);
+        if (err != cudaSuccess) {
+            // OOM — clear error and signal caller to use native turbo path
+            (void)cudaGetLastError();
+            sh.buf      = nullptr;
+            sh.capacity = 0;
+            static bool warned = false;
+            if (!warned) {
+                fprintf(stderr, "turbo_shadow_sync: shadow cache alloc failed (%.1f MiB, ne3=%ld), falling back to native turbo FA\n",
+                        sz / (1024.0 * 1024.0), (long)ne3);
+                warned = true;
+            }
+            return false;
+        }
+        sh.capacity = ne1;
+        sh.ne0      = ne0;
+        sh.ne2      = ne2;
+        sh.ne3      = ne3;
+        sh.src_data = T->data;
+    }
+
+    const int64_t row_start = 0;
+    const int64_t n_rows    = ne1;
+
+    if (n_rows > 0) {
+        const int64_t dst_row_stride  = ne0;
+        const int64_t dst_head_stride = ne0 * ne1;  // contiguous layout: head stride = ne0 * ne1
+        const int threads = ne0 > 1024 ? 1024 : (int)ne0;
+
+        // Dequant each stream slice separately to handle ne[3] > 1 (multi-slot).
+        // Each stream slice has its own row stride in the source tensor (T->nb[3]),
+        // and we write each slice contiguously into the shadow buffer.
+        for (int64_t s = 0; s < ne3; ++s) {
+            const char * src_stream = (const char *)T->data + s * T->nb[3];
+            half * dst_stream = sh.buf + s * (ne0 * ne1 * ne2);
+
+            dim3 grid((int)n_rows, (int)ne2);
+            if (T->type == GGML_TYPE_TURBO4_0) {
+                k_turbo4_dequant_rows_f16<<<grid, threads, 0, stream>>>(
+                    src_stream, dst_stream, ne0,
+                    row_start, n_rows,
+                    T->nb[1], T->nb[2],
+                    dst_row_stride, dst_head_stride);
+            } else if (T->type == GGML_TYPE_TURBO2_0) {
+                k_turbo2_dequant_rows_f16<<<grid, threads, 0, stream>>>(
+                    src_stream, dst_stream, ne0,
+                    row_start, n_rows,
+                    T->nb[1], T->nb[2],
+                    dst_row_stride, dst_head_stride);
+            } else {
+                k_turbo3_dequant_rows_f16<<<grid, threads, 0, stream>>>(
+                    src_stream, dst_stream, ne0,
+                    row_start, n_rows,
+                    T->nb[1], T->nb[2],
+                    dst_row_stride, dst_head_stride);
+            }
+        }
+    }
+
+    // Build T_f16 that looks contiguous to FA — use ne1 (actual fill) not capacity for strides.
+    // This makes ggml_is_contiguously_allocated() return true and avoids FA re-conversion paths.
+    T_f16           = *T;
+    T_f16.type      = GGML_TYPE_F16;
+    T_f16.data      = sh.buf;
+    T_f16.view_src  = nullptr;
+    T_f16.view_offs = 0;
+    T_f16.nb[0]     = sizeof(half);
+    T_f16.nb[1]     = ne0 * sizeof(half);
+    T_f16.nb[2]     = ne0 * ne1 * sizeof(half);
+    T_f16.nb[3]     = ne0 * ne1 * ne2 * sizeof(half);
+    return true;
+}
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -325,6 +537,18 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_Q8_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,      GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,      GGML_TYPE_TURBO4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,      GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,      GGML_TYPE_Q8_0)
+
     GGML_ABORT("fatal error");
 }
 
@@ -335,7 +559,12 @@ enum best_fattn_kernel {
     BEST_FATTN_KERNEL_VEC      = 100,
     BEST_FATTN_KERNEL_WMMA_F16 = 300,
     BEST_FATTN_KERNEL_MMA_F16  = 400,
+    BEST_FATTN_KERNEL_TILE_Q8  = 500,
 };
+
+#ifdef GGML_USE_HIP
+    void ggml_cuda_flash_attn_ext_tile_q8(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+#endif
 
 static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const ggml_tensor * dst) {
 #ifndef FLASH_ATTN_AVAILABLE
@@ -351,6 +580,19 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     const int gqa_ratio = Q->ne[2] / K->ne[2];
     GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
+
+    const bool turbo_k = (K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0);
+    const bool turbo_v = (V->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0);
+
+    if (turbo_k || turbo_v) {
+        return BEST_FATTN_KERNEL_VEC;
+    }
+
+#ifdef GGML_USE_HIP
+    if (GGML_HIP_GFX906 && K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0 && Q->ne[0] <= 128) {
+        return BEST_FATTN_KERNEL_TILE_Q8;
+    }
+#endif
 
     float max_bias = 0.0f;
     memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
@@ -538,22 +780,111 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 }
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+
+    const bool turbo_k = (K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0);
+    const bool turbo_v = (V->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0);
+
     ggml_cuda_set_device(ctx.device);
-    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+
+    if (!turbo_k && !turbo_v) {
+        switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+            case BEST_FATTN_KERNEL_NONE:
+                GGML_ABORT("fatal error");
+            case BEST_FATTN_KERNEL_TILE:
+                ggml_cuda_flash_attn_ext_tile(ctx, dst);
+                break;
+            case BEST_FATTN_KERNEL_VEC:
+                ggml_cuda_flash_attn_ext_vec(ctx, dst);
+                break;
+            case BEST_FATTN_KERNEL_WMMA_F16:
+                ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
+                break;
+            case BEST_FATTN_KERNEL_MMA_F16:
+                ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+                break;
+#ifdef GGML_USE_HIP
+            case BEST_FATTN_KERNEL_TILE_Q8:
+                ggml_cuda_flash_attn_ext_tile_q8(ctx, dst);
+                break;
+#endif
+        }
+        return;
+    }
+
+    // Shadow cache: full dequant K+V to contiguous fp16, then fast f16 FA
+    // Set GGML_TURBO_DECODE_NATIVE=1 for native turbo3 vec kernel (slower fallback)
+    static const bool turbo_native = (getenv("GGML_TURBO_DECODE_NATIVE") != nullptr);
+    if (turbo_native) {
+        switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+            case BEST_FATTN_KERNEL_NONE:
+                GGML_ABORT("fatal error");
+            case BEST_FATTN_KERNEL_TILE:
+                ggml_cuda_flash_attn_ext_tile(ctx, dst);
+                break;
+            case BEST_FATTN_KERNEL_VEC:
+                ggml_cuda_flash_attn_ext_vec(ctx, dst);
+                break;
+            case BEST_FATTN_KERNEL_WMMA_F16:
+                ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
+                break;
+            case BEST_FATTN_KERNEL_MMA_F16:
+                ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+                break;
+#ifdef GGML_USE_HIP
+            case BEST_FATTN_KERNEL_TILE_Q8:
+                ggml_cuda_flash_attn_ext_tile_q8(ctx, dst);
+                break;
+#endif
+        }
+        return;
+    }
+
+    cudaStream_t stream = ctx.stream();
+
+    ggml_tensor K_f16, V_f16;
+    ggml_tensor * dst_mod = dst;
+    ggml_tensor dst_copy = *dst;
+    bool shadow_ok = true;
+
+    if (turbo_k) {
+        turbo_fp16_shadow & shK = g_turbo_shadows[K->data];
+        if (!turbo_shadow_sync(K, shK, K_f16, stream)) { shadow_ok = false; }
+        else { dst_copy.src[1] = &K_f16; dst_mod = &dst_copy; }
+    }
+    if (turbo_v && shadow_ok) {
+        turbo_fp16_shadow & shV = g_turbo_shadows[V->data];
+        if (!turbo_shadow_sync(V, shV, V_f16, stream)) { shadow_ok = false; }
+        else { dst_copy.src[2] = &V_f16; dst_mod = &dst_copy; }
+    }
+
+    // Shadow cache OOM — fall back to native turbo vec kernel (slower but no extra memory)
+    if (!shadow_ok) {
+        ggml_cuda_flash_attn_ext_vec(ctx, dst);
+        return;
+    }
+
+    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst_mod)) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
         case BEST_FATTN_KERNEL_TILE:
-            ggml_cuda_flash_attn_ext_tile(ctx, dst);
+            ggml_cuda_flash_attn_ext_tile(ctx, dst_mod);
             break;
         case BEST_FATTN_KERNEL_VEC:
-            ggml_cuda_flash_attn_ext_vec(ctx, dst);
+            ggml_cuda_flash_attn_ext_vec(ctx, dst_mod);
             break;
         case BEST_FATTN_KERNEL_WMMA_F16:
-            ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
+            ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst_mod);
             break;
         case BEST_FATTN_KERNEL_MMA_F16:
-            ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+            ggml_cuda_flash_attn_ext_mma_f16(ctx, dst_mod);
             break;
+#ifdef GGML_USE_HIP
+        case BEST_FATTN_KERNEL_TILE_Q8:
+            ggml_cuda_flash_attn_ext_tile_q8(ctx, dst_mod);
+            break;
+#endif
     }
 }
 

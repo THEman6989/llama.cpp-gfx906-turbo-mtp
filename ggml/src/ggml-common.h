@@ -201,6 +201,44 @@ typedef struct {
 } block_q4_1;
 static_assert(sizeof(block_q4_1) == 2 * sizeof(ggml_half) + QK4_1 / 2, "wrong q4_1 block size/padding");
 
+// TurboQuant 3-bit MSE-only: 3-bit PolarQuant indices (no QJL)
+// Storage block size = 32 (matches q4_0 for optimal GPU parallelism)
+// Transform group size = 128 (head_dim, for rotation Gaussianization)
+// Per block: norm(fp16) + 2-bit indices (8 bytes) + 1-bit extra (4 bytes) = 14 bytes per 32 values
+// = 3.5 bits/value → 4.6× compression vs fp16
+// The 3-bit index is split: lower 2 bits in qs[], upper 1 bit in signs[]
+#define QK_TURBO3 32   // Block size 32: matches q4_0 parallelism, graph handles WHT rotation
+#define QK_TURBO3_GROUP 128  // rotation group size = head_dim
+typedef struct {
+    ggml_half  norm;                    //  2 bytes: vector L2 norm (for rescaling)
+    uint8_t    qs[QK_TURBO3 / 4];      //  8 bytes: lower 2-bit indices (4 per byte)
+    uint8_t    signs[QK_TURBO3 / 8];   //  4 bytes: upper 1-bit of 3-bit index (8 per byte)
+    uint8_t    pad[2];                  //  2 bytes: padding for 16-byte GDDR7 alignment
+} block_turbo3_0;                       // 16 bytes total (was 14)
+static_assert(sizeof(block_turbo3_0) == 16, "turbo3_0 block must be 16 bytes for GDDR7 alignment");
+
+// TurboQuant 4-bit: 3-bit PolarQuant indices + 1-bit QJL signs
+// Per block: norm(fp16) + residual_norm(fp16) + 3-bit indices (48 bytes) + 1-bit signs (16 bytes)
+// = 68 bytes per 128 values = 4.25 bits/value → 3.8× compression vs fp16
+#define QK_TURBO4 128
+typedef struct {
+    ggml_half  norm;                    //  2 bytes
+    ggml_half  rnorm;                   //  2 bytes
+    uint8_t    qs[3 * QK_TURBO4 / 8];   // 48 bytes
+    uint8_t    signs[QK_TURBO4 / 8];    // 16 bytes
+} block_turbo4_0;                       // 68 bytes total
+static_assert(sizeof(block_turbo4_0) == 68, "turbo4_0 block size mismatch");
+
+// TurboQuant 2-bit: 2-bit PolarQuant (no QJL, no signs)
+// Per block: norm(fp16) + 2-bit indices (8 bytes) = 10 bytes per 32 values
+// = 2.5 bits/value → 6.4× compression vs fp16
+#define QK_TURBO2 32
+typedef struct {
+    ggml_half  norm;                    //  2 bytes
+    uint8_t    qs[QK_TURBO2 / 4];       //  8 bytes
+} block_turbo2_0;                       // 10 bytes total
+static_assert(sizeof(block_turbo2_0) == 10, "turbo2_0 block size mismatch");
+
 #define QK_MXFP4 32
 typedef struct {
     uint8_t e; // E8M0
