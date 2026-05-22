@@ -9,10 +9,23 @@
 
 using namespace ggml_cuda_mma;
 
+// GFX906 MMQ optimizations
+#ifdef GGML_HIP_GFX906
+    #include "gfx906/matmul/mmq.cuh"
+    #include "gfx906/gfx906-config.h"
+    #include "gfx906/matmul/mmq-prefetch.cuh"
+#endif
+
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
-#define MMQ_ITER_K             256
-#define MMQ_ITER_K_FP4         512
-#define MMQ_NWARPS               8
+
+// GFX906-optimized MMQ configuration
+#ifdef GGML_HIP_GFX906
+    #define MMQ_NWARPS GFX906_MMQ_NWARPS
+#else
+    #define MMQ_NWARPS 8
+#endif
+#define MMQ_ITER_K 256
+#define MMQ_ITER_K_MXFP4_FP4 512
 
 typedef void (*load_tiles_mmq_t)(const char * __restrict__ x, int * x_tile, const int kbx0, const int i_max, const int stride);
 typedef void (*vec_dot_mmq_t)(const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00);
@@ -50,8 +63,8 @@ struct block_q8_1_mmq {
 // mxfp4 has block size 32, each int32 of d4 contains 2 e8m0 scales in the lower 16 bits
 // nvfp4 has block size 16, each int32 of d4 contains 4 ue4m3 scales
 struct block_fp4_mmq {
-    uint32_t d4[4];
-    int8_t   qs[4 * 32];  // 256 FP4 values packed as 4-bit pairs (2 per byte)
+    uint32_t d4[4];       // 8 E8M0 scales (1 per 32 values), 2 packed per uint32: d4[0]={s0,s1}, d4[1]={s2,s3}, etc.
+    int8_t   qs[4 * 32];  // 256 FP4 values packed as 4-bit pairs (2 per byte), 8 blocks of 32 values
 };
 
 static_assert(sizeof(block_q8_1_mmq) == 4*QK8_1 + 4*sizeof(half2), "Unexpected block_q8_1_mmq size");
@@ -117,9 +130,9 @@ static int get_mmq_x_max_host(const int cc) {
 }
 
 static constexpr __device__ int get_mmq_x_max_device() {
-#if defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     return 128;
-#else // defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+#else // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
 #if defined(GGML_USE_HIP)
     return 64;
@@ -792,24 +805,46 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const int kbx  = txi / QI8_0;
     const int kqsx = txi % QI8_0;
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Software pipelining using macros from gfx906-mmq.cuh
+    constexpr int loop_iters = mmq_y / (nrows * nwarps);
+    constexpr int cache_size = loop_iters > 16 ? 16 : loop_iters;
+    int qs0_cache[cache_size];
+    int qs1_cache[cache_size];
+    int i_slot_cache[cache_size];
+
+    // Load all data into registers (async)
+    GFX906_LOAD_TILES_Q8_0_ASYNC(cache_size, nrows, nwarps, threads_per_row, need_check,
+        x, kbx0, stride, i_max, txi, kbx, kqsx, qs0_cache, qs1_cache, i_slot_cache);
+
+    // Store all to LDS
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    GFX906_STORE_TILES_Q8_0_LDS_MMA(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
+#else
+    GFX906_STORE_TILES_Q8_0_LDS_LEGACY(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
+#endif
+#else
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
-        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        // GFX906 optimization: Avoid LDS write conflicts in need_check path.
+        // Original code clamped i to i_max, causing all out-of-bounds threads to
+        // write to the SAME location (tile[i_max*...]) - serializing LDS writes.
+        // Fix: Each thread writes to its ORIGINAL slot; out-of-bounds write zeros.
+        const int i_slot = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        const int i_read = need_check ? min(i_slot, i_max) : i_slot;
+        const bool oob = need_check && (i_slot > i_max);
 
-        if (need_check) {
-            i = min(i, i_max);
-        }
-
-        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i*stride + kbx;
+        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i_read*stride + kbx;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = get_int_b2(bxi[0].qs,                   kqsx);
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
+        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = oob ? 0 : get_int_b2(bxi[0].qs,                   kqsx);
+        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = oob ? 0 : get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
 #else
-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = get_int_b2(bxi[0].qs,                   kqsx);
-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
+        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = oob ? 0 : get_int_b2(bxi[0].qs,                   kqsx);
+        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = oob ? 0 : get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
+#endif
 
     constexpr int blocks_per_tile_x_row = 2*MMQ_TILE_NE_K / QI8_0;
     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;

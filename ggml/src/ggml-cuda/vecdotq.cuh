@@ -2,6 +2,11 @@
 
 #include "common.cuh"
 
+// GFX906 optimizations
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    #include "gfx906/quantize/vecdotq.cuh"
+#endif
+
 #include <cstdint>
 
 static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {
@@ -39,13 +44,16 @@ static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, con
     const uint32_t q_even = q4;
     const uint32_t q_odd  = (q4 >> 4);
 
+    const uint32_t sel_even = q_even & 0x07070707;
+    const uint32_t sel_odd  = q_odd & 0x07070707;
+
     // Perform lookups in the lower half of the table (indices 0-7).
-    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], q_even & 0x07070707);
-    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], q_odd & 0x07070707);
+    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], sel_even);
+    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], sel_odd);
 
     // Perform lookups in the upper half of the table (indices 8-15).
-    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], q_even & 0x07070707);
-    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], q_odd & 0x07070707);
+    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], sel_even);
+    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], sel_odd);
 
     // Select between the low and high results based on the MSB of each index nibble.
     uint32_t mask_even = 0x03020100 | ((q_even & 0x08080808) >> 1);
