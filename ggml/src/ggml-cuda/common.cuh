@@ -33,9 +33,6 @@
 
 #if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
-#if defined(GGML_HIP_GFX906)
-#include "gfx906/gfx906-common.cuh"
-#endif
 #elif defined(GGML_USE_MUSA)
 #include "vendors/musa.h"
 #else
@@ -46,6 +43,11 @@
 #define STRINGIZE(...) STRINGIZE_IMPL(__VA_ARGS__)
 
 #define WARP_SIZE 32
+
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906)
+#include "gfx906/gfx906-common.cuh"
+#endif
+
 #define CUDART_HMAX   11070 // CUDA 11.7, min. ver. for which __hmax and __hmax2 are known to work (may be higher than needed)
 #define CUDART_HMASK  12000 // CUDA 12.0, min. ver. for half2 -> uint mask comparisons
 
