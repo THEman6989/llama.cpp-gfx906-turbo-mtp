@@ -705,11 +705,11 @@ to_bf16_cuda_t ggml_get_to_bf16_cuda(ggml_type type) {
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_TURBO3_0:
-            return dequantize_row_turbo3_0_cuda;
+            return nullptr; // turbo convert path not implemented
         case GGML_TYPE_TURBO4_0:
-            return dequantize_row_turbo4_0_cuda;
+            return nullptr; // turbo convert path not implemented
         case GGML_TYPE_TURBO2_0:
-            return dequantize_row_turbo2_0_cuda;
+            return nullptr; // turbo convert path not implemented
         default:
             return nullptr;
     }
@@ -769,11 +769,11 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
         case GGML_TYPE_BF16:
             return convert_unary_cont_cuda<nv_bfloat16>;
         case GGML_TYPE_TURBO3_0:
-            return dequantize_row_turbo3_0_cuda;
+            return nullptr; // turbo convert path not implemented
         case GGML_TYPE_TURBO4_0:
-            return dequantize_row_turbo4_0_cuda;
+            return nullptr; // turbo convert path not implemented
         case GGML_TYPE_TURBO2_0:
-            return dequantize_row_turbo2_0_cuda;
+            return nullptr; // turbo convert path not implemented
         default:
             return nullptr;
     }
@@ -830,11 +830,11 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
         case GGML_TYPE_BF16:
             return convert_unary_cont_cuda<nv_bfloat16>;
         case GGML_TYPE_TURBO3_0:
-            return dequantize_row_turbo3_0_cuda;
+            return nullptr; // turbo convert path not implemented
         case GGML_TYPE_TURBO4_0:
-            return dequantize_row_turbo4_0_cuda;
+            return nullptr; // turbo convert path not implemented
         case GGML_TYPE_TURBO2_0:
-            return dequantize_row_turbo2_0_cuda;
+            return nullptr; // turbo convert path not implemented
         default:
             return nullptr;
     }
