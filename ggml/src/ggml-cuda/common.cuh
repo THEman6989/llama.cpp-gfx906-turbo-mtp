@@ -33,6 +33,9 @@
 
 #if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
+#if defined(GGML_HIP_GFX906)
+#include "gfx906/gfx906-common.cuh"
+#endif
 #elif defined(GGML_USE_MUSA)
 #include "vendors/musa.h"
 #else
@@ -441,11 +444,15 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906)
+    return gfx906_warp_reduce_sum<width>(x);
+#else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
         x += __shfl_xor_sync(0xffffffff, x, offset, width);
     }
     return x;
+#endif
 }
 
 template<int width = WARP_SIZE>
@@ -501,11 +508,15 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906)
+    return gfx906_warp_reduce_max<width>(x);
+#else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
         x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
     }
     return x;
+#endif
 }
 
 template<typename T, int width = WARP_SIZE>
