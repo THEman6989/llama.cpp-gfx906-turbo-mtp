@@ -1105,7 +1105,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
+static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -5601,7 +5601,7 @@ struct ggml_tensor * ggml_turbo_wht(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         bool                  inverse) {
-    struct ggml_tensor * result = ggml_new_tensor(ctx, a->type, a->n_dims, a->ne);
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
 
     int32_t inverse_i = inverse ? 1 : 0;
     ggml_set_op_params(result, &inverse_i, sizeof(inverse_i));
