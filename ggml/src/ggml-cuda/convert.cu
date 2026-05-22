@@ -656,6 +656,71 @@ static void dequantize_row_nvfp4_cuda(
     const int nb = k / QK_NVFP4;
     dequantize_block_nvfp4<<<nb, 32, 0, stream>>>(vx, y, k);
 }
+
+// TurboQuant dequantize kernels (thread-per-element for simplicity/completeness)
+template<typename dst_t>
+static __global__ void dequantize_block_turbo3_0_kernel(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= k) return;
+    const int64_t blk_idx = i >> 5; // /32
+    const int     elem    = (int)(i & 31); // %32
+    const block_turbo3_0 * x = (const block_turbo3_0 *)vx + blk_idx;
+    const float norm = __half2float(x->norm);
+    uint8_t low2 = (x->qs[elem >> 2] >> ((elem & 3) << 1)) & 0x3;
+    uint8_t hi1  = (x->signs[elem >> 3] >> (elem & 7)) & 0x1;
+    y[i] = ggml_cuda_cast<dst_t>(TURBO3_CENTROIDS_D[low2 | (hi1 << 2)] * norm);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo3_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int threads = 256;
+    const int blocks  = (k + threads - 1) / threads;
+    dequantize_block_turbo3_0_kernel<dst_t><<<blocks, threads, 0, stream>>>(vx, y, k);
+}
+
+template<typename dst_t>
+static __global__ void dequantize_block_turbo2_0_kernel(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= k) return;
+    const int64_t blk_idx = i >> 5;
+    const int     elem    = (int)(i & 31);
+    const block_turbo2_0 * x = (const block_turbo2_0 *)vx + blk_idx;
+    const float norm = __half2float(x->norm);
+    uint8_t idx = (x->qs[elem >> 2] >> ((elem & 3) << 1)) & 0x3;
+    y[i] = ggml_cuda_cast<dst_t>(TURBO2_CENTROIDS_D[idx] * norm);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo2_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int threads = 256;
+    const int blocks  = (k + threads - 1) / threads;
+    dequantize_block_turbo2_0_kernel<dst_t><<<blocks, threads, 0, stream>>>(vx, y, k);
+}
+
+template<typename dst_t>
+static __global__ void dequantize_block_turbo4_0_kernel(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= k) return;
+    const int64_t blk_idx = i / QK_TURBO4;
+    const int     j       = (int)(i % QK_TURBO4);
+    const block_turbo4_0 * x = (const block_turbo4_0 *)vx + blk_idx;
+    const float norm = __half2float(x->norm);
+    const float rnorm = __half2float(x->rnorm);
+    const float qjl_scale = 1.2533141f / 128.0f * rnorm;
+    int bo = j * 3, bi = bo / 8, bp = bo % 8;
+    uint16_t raw = (uint16_t)x->qs[bi];
+    if (bi + 1 < 48) raw |= (uint16_t)x->qs[bi + 1] << 8;
+    uint8_t idx = (uint8_t)((raw >> bp) & 0x7);
+    float s = (x->signs[j / 8] & (1 << (j % 8))) ? 1.0f : -1.0f;
+    y[i] = ggml_cuda_cast<dst_t>((TURBO3_CENTROIDS_D[idx] + s * qjl_scale) * norm);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo4_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int threads = 256;
+    const int blocks  = (k + threads - 1) / threads;
+    dequantize_block_turbo4_0_kernel<dst_t><<<blocks, threads, 0, stream>>>(vx, y, k);
+}
 template <typename src_t, typename dst_t>
 static __global__ void convert_unary(
         const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t ne00, const int64_t ne01,

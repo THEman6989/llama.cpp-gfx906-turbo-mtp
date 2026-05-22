@@ -220,15 +220,15 @@ static void ggml_cuda_get_rows_switch_src0_type(
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         case GGML_TYPE_TURBO3_0:
-            get_rows_cuda_turbo3(src0_d, src1_d, dst_d,
+            get_rows_cuda_q<QK_TURBO3, QR_TURBO3, dequantize_turbo3_0>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         case GGML_TYPE_TURBO4_0:
-            get_rows_cuda_turbo4(src0_d, src1_d, dst_d,
+            get_rows_cuda_q<QK_TURBO4, QR_TURBO4, dequantize_turbo4_0>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         case GGML_TYPE_TURBO2_0:
-            get_rows_cuda_turbo2(src0_d, src1_d, dst_d,
+            get_rows_cuda_q<QK_TURBO2, QR_TURBO2, dequantize_turbo2_0>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         default:
