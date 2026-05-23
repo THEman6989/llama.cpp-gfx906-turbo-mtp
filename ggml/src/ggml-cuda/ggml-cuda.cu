@@ -104,13 +104,27 @@ static bool ggml_cuda_gfx906_trace_enabled() {
     return enabled;
 }
 
+static int ggml_cuda_gfx906_trace_limit() {
+    static const int limit = []() {
+        const char * env = std::getenv("GGML_GFX906_TRACE_LIMIT");
+        if (env == nullptr || env[0] == '\0') {
+            return 4096;
+        }
+
+        char * end = nullptr;
+        const long parsed = std::strtol(env, &end, 10);
+        return end != env && parsed > 0 ? (int) parsed : 4096;
+    }();
+
+    return limit;
+}
+
 static void ggml_cuda_gfx906_trace_log(std::atomic<int> & counter, const char * fmt, ...) {
     if (!ggml_cuda_gfx906_trace_enabled()) {
         return;
     }
 
-    constexpr int trace_limit = 256;
-    if (counter.fetch_add(1, std::memory_order_relaxed) >= trace_limit) {
+    if (counter.fetch_add(1, std::memory_order_relaxed) >= ggml_cuda_gfx906_trace_limit()) {
         return;
     }
 
