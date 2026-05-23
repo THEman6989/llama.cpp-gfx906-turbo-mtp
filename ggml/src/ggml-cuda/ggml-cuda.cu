@@ -119,13 +119,29 @@ static int ggml_cuda_gfx906_trace_limit() {
     return limit;
 }
 
-static bool ggml_cuda_gfx906_trace_path_enabled(const char * path) {
+static int64_t ggml_cuda_gfx906_trace_max_ne2() {
+    static const int64_t max_ne2 = []() {
+        const char * env = std::getenv("GGML_GFX906_TRACE_MAX_NE2");
+        if (env == nullptr || env[0] == '\0') {
+            return int64_t{0};
+        }
+
+        char * end = nullptr;
+        const long long parsed = std::strtoll(env, &end, 10);
+        return end != env && parsed > 0 ? (int64_t) parsed : int64_t{0};
+    }();
+
+    return max_ne2;
+}
+
+static bool ggml_cuda_gfx906_trace_path_enabled(const char * path, int64_t ne2) {
     static const char * filter = []() {
         const char * env = std::getenv("GGML_GFX906_TRACE_FILTER");
         return env != nullptr && env[0] != '\0' ? env : nullptr;
     }();
 
-    return filter == nullptr || std::strstr(path, filter) != nullptr;
+    const int64_t max_ne2 = ggml_cuda_gfx906_trace_max_ne2();
+    return (filter == nullptr || std::strstr(path, filter) != nullptr) && (max_ne2 <= 0 || ne2 <= max_ne2);
 }
 
 static void ggml_cuda_gfx906_trace_log(std::atomic<int> & counter, const char * fmt, ...) {
@@ -2679,7 +2695,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
     auto trace_path = [&](const char * path) {
-        if (!ggml_cuda_gfx906_trace_path_enabled(path)) {
+        if (!ggml_cuda_gfx906_trace_path_enabled(path, src1->ne[1])) {
             return;
         }
 
@@ -2746,7 +2762,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
     auto trace_path = [&](const char * path, int mmvq_mmid_max, bool use_mmq, bool use_mmf) {
-        if (!ggml_cuda_gfx906_trace_path_enabled(path)) {
+        if (!ggml_cuda_gfx906_trace_path_enabled(path, ne2)) {
             return;
         }
 

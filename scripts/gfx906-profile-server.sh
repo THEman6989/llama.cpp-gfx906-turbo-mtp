@@ -129,7 +129,8 @@ EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
 if [[ "${START_SERVER}" == "1" ]]; then
     export GGML_GFX906_TRACE="${GGML_GFX906_TRACE:-1}"
-    export GGML_GFX906_TRACE_FILTER="${GGML_GFX906_TRACE_FILTER:-mul_mat_id_mmvq}"
+    export GGML_GFX906_TRACE_FILTER="${GGML_GFX906_TRACE_FILTER:-mul_mat_id_}"
+    export GGML_GFX906_TRACE_MAX_NE2="${GGML_GFX906_TRACE_MAX_NE2:-4}"
 else
     GGML_GFX906_TRACE="${GGML_GFX906_TRACE:-0}"
 fi
@@ -390,6 +391,7 @@ grep -Ei \
     echo "GGML_GFX906_TRACE: ${GGML_GFX906_TRACE:-0}"
     echo "GGML_GFX906_TRACE_FILTER: ${GGML_GFX906_TRACE_FILTER:-}"
     echo "GGML_GFX906_TRACE_LIMIT: ${GGML_GFX906_TRACE_LIMIT:-}"
+    echo "GGML_GFX906_TRACE_MAX_NE2: ${GGML_GFX906_TRACE_MAX_NE2:-}"
     echo
     echo "rocm:"
     if command -v /opt/rocm/bin/hipconfig >/dev/null 2>&1; then
