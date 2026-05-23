@@ -588,7 +588,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
 #ifdef GGML_USE_HIP
-    if (GGML_HIP_GFX906 && K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0 && Q->ne[0] <= 128) {
+    if (GGML_HIP_GFX906 && K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0 && Q->ne[0] <= 256) {
         return BEST_FATTN_KERNEL_TILE_Q8;
     }
 #endif
