@@ -469,17 +469,17 @@ static __global__ void kernel_turbo_dense_rotate(
     }
 }
 
-// FWHT via shared memory — one thread per block, avoids HIP compiler bug on gfx906
-__launch_bounds__(1, 1)
+// FWHT via registers. Each thread handles one 128-element group.
+__launch_bounds__(256, 1)
 static __global__ void kernel_turbo_wht(
     const float * __restrict__ src,
     float       * __restrict__ dst,
     const int64_t n_elements,
     const int     direction
 ) {
-    __shared__ float x[128];
+    float x[128];
 
-    const int64_t group_idx = blockIdx.x;
+    const int64_t group_idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     const int64_t n_groups = n_elements / 128;
     if (group_idx >= n_groups) return;
 
@@ -520,9 +520,8 @@ static __constant__ float TURBO3_MIDPOINTS_QC[7] = {
      0.043589f,  0.091775f,  0.154259f
 };
 
-// FWHT via shared memory — avoids HIP compiler optimization bug on gfx906
-// One thread per block, FWHT buffer in shared memory (not registers)
-__launch_bounds__(1, 1)
+// FWHT via registers. Each thread handles one 128-element group.
+__launch_bounds__(256, 1)
 static __global__ void kernel_set_rows_turbo3(
     const float * __restrict__ src0,
     const int64_t * __restrict__ src1,
@@ -534,7 +533,7 @@ static __global__ void kernel_set_rows_turbo3(
     const int n_groups_per_row,
     const int use_v_signs
 ) {
-    __shared__ float x[128];
+    float x[128];
 
     const float * wht_signs1 = use_v_signs ? d_turbo_wht_signs1_v : d_turbo_wht_signs1;
     const float * wht_signs2 = use_v_signs ? d_turbo_wht_signs2_v : d_turbo_wht_signs2;
@@ -542,7 +541,7 @@ static __global__ void kernel_set_rows_turbo3(
     const int64_t row = blockIdx.x;
     if (row >= ne01) return;
 
-    const int grp_idx = blockIdx.y;
+    const int grp_idx = blockIdx.y * blockDim.x + threadIdx.x;
     if (grp_idx >= n_groups_per_row) return;
 
     const float * src_row = (const float *)((const char *)src0 + row * nb01);
@@ -557,12 +556,7 @@ static __global__ void kernel_set_rows_turbo3(
     float grp_norm = sqrtf(norm_sq);
     float inv_norm = (grp_norm > 1e-10f) ? (1.0f / grp_norm) : 0.0f;
 
-    // Dense rotation: x = R * (src / norm)
-    // R^T is passed via use_v_signs overloaded as pointer index
-    // Actually we can't easily pass the matrix pointer to this kernel,
-    // so we use the FWHT approach but this time it should work since
-    // we verified FWHT is correct in standalone tests.
-    // The issue must be elsewhere — let's re-enable FWHT.
+    // Forward FWHT rotation (K or V specific signs).
     for (int i = 0; i < 128; i++) x[i] = grp_src[i] * inv_norm * wht_signs1[i];
     for (int h = 1; h < 128; h *= 2)
         for (int i = 0; i < 128; i += h * 2)
@@ -655,9 +649,11 @@ void ggml_cuda_op_set_rows_turbo3(
     GGML_ASSERT(ne00 % 128 == 0);
     const int n_groups_per_row = ne00 / 128;
 
-    // 1 thread per block, 1 block per group (avoids register pressure issues on gfx906)
-    dim3 grid(ne01, n_groups_per_row);
-    dim3 block(1);
+    const int threads = 32;
+    const int grp_blocks = (n_groups_per_row + threads - 1) / threads;
+
+    dim3 grid(ne01, grp_blocks);
+    dim3 block(threads);
 
     const int is_v = turbo_is_v_tensor(dst) ? 1 : 0;
 
@@ -964,7 +960,10 @@ void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
 
     const int64_t n_groups = n_elements / 128;
 
+    const int threads = 32;
+    const int blocks = (int)((n_groups + threads - 1) / threads);
+
     // FWHT kernel (verified correct in standalone tests)
-    kernel_turbo_wht<<<(int)n_groups, 1, 0, ctx.stream()>>>(
+    kernel_turbo_wht<<<blocks, threads, 0, ctx.stream()>>>(
         src_data, dst_data, n_elements, direction);
 }
