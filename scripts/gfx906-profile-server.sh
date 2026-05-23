@@ -136,6 +136,15 @@ if [[ "${START_SERVER}" == "1" && ! -x "${SERVER_BIN}" ]]; then
     exit 2
 fi
 
+if [[ "${START_SERVER}" == "1" && "${GGML_GFX906_TRACE}" != "0" ]]; then
+    TRACE_LIB="$(ldd "${SERVER_BIN}" 2>/dev/null | awk '/libggml-hip\.so/ { print $3; exit }')"
+    if [[ -n "${TRACE_LIB}" && -r "${TRACE_LIB}" ]] && ! grep -a -q 'gfx906_trace: %s' "${TRACE_LIB}"; then
+        echo "GGML_GFX906_TRACE is enabled, but the linked libggml-hip does not contain gfx906 tracing." >&2
+        echo "Rebuild llama-server, then run this profiler again." >&2
+        exit 2
+    fi
+fi
+
 PROMPT_ARG="${1:-}"
 RUN_DIR="${2:-profiles/gfx906-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "${RUN_DIR}"
