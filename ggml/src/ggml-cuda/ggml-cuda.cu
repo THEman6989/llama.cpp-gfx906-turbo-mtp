@@ -120,7 +120,8 @@ static void ggml_cuda_gfx906_trace_log(std::atomic<int> & counter, const char * 
     vsnprintf(msg, sizeof(msg), fmt, args);
     va_end(args);
 
-    GGML_LOG_INFO("gfx906_trace: %s\n", msg);
+    fprintf(stderr, "gfx906_trace: %s\n", msg);
+    fflush(stderr);
 }
 
 [[noreturn]]
@@ -252,6 +253,10 @@ static ggml_cuda_device_info ggml_cuda_init() {
     }
     GGML_LOG_INFO("%s: found %d " GGML_CUDA_NAME " devices (Total VRAM: %zu MiB):\n",
                   __func__, info.device_count, (size_t)(total_vram / (1024 * 1024)));
+    if (ggml_cuda_gfx906_trace_enabled()) {
+        fprintf(stderr, "gfx906_trace: enabled at %s, device_count=%d\n", __func__, info.device_count);
+        fflush(stderr);
+    }
     total_vram = 0;
 
     std::vector<std::pair<int, std::string>> turing_devices_without_mma;
