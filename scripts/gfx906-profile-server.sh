@@ -14,6 +14,7 @@ Environment overrides:
   MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:Q8_0
   HOST=0.0.0.0
   PORT=8033
+  SERVER_URL=http://127.0.0.1:8033
   N_PREDICT=256
   START_SERVER=1        # set 0 to use an already-running server
   SAVE_RESPONSE=0       # set 1 to save generated text
@@ -117,6 +118,7 @@ SERVER_BIN="${SERVER_BIN:-./build/bin/llama-server}"
 MODEL="${MODEL:-unsloth/Qwen3.6-35B-A3B-GGUF:Q8_0}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8033}"
+SERVER_URL="${SERVER_URL:-http://127.0.0.1:${PORT}}"
 N_PREDICT="${N_PREDICT:-256}"
 START_SERVER="${START_SERVER:-1}"
 SAVE_RESPONSE="${SAVE_RESPONSE:-0}"
@@ -192,15 +194,35 @@ if [[ -n "${EXTRA_SERVER_ARGS}" ]]; then
 fi
 
 if [[ "${START_SERVER}" == "1" ]]; then
+    if python3 - "$PORT" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.settimeout(0.5)
+    sys.exit(0 if sock.connect_ex(("127.0.0.1", port)) == 0 else 1)
+PY
+    then
+        echo "port ${PORT} is already in use. Stop the old server or set PORT=another_port." >&2
+        exit 2
+    fi
+
     echo "starting llama-server, log: ${SERVER_LOG}"
     "${server_cmd[@]}" >"${SERVER_LOG}" 2>&1 &
     SERVER_PID="$!"
+    sleep 2
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        echo "llama-server exited before becoming healthy. Last log lines:" >&2
+        tail -n 80 "${SERVER_LOG}" >&2 || true
+        exit 1
+    fi
 else
-    echo "START_SERVER=0: using existing server on port ${PORT}"
+    echo "START_SERVER=0: using existing server at ${SERVER_URL}"
     : >"${SERVER_LOG}"
 fi
 
-python3 - "$PORT" "$PROMPT_FILE" "$N_PREDICT" "$CLIENT_JSON" "$TIMINGS_JSON" "$SAVE_RESPONSE" <<'PY'
+python3 - "$SERVER_URL" "$PROMPT_FILE" "$N_PREDICT" "$CLIENT_JSON" "$TIMINGS_JSON" "$SAVE_RESPONSE" <<'PY'
 import json
 import os
 import sys
@@ -208,14 +230,12 @@ import time
 import urllib.error
 import urllib.request
 
-port = int(sys.argv[1])
+base = sys.argv[1].rstrip("/")
 prompt_file = sys.argv[2]
 n_predict = int(sys.argv[3])
 client_json = sys.argv[4]
 timings_json = sys.argv[5]
 save_response = sys.argv[6] == "1"
-
-base = f"http://127.0.0.1:{port}"
 
 def request_json(method, path, data=None, timeout=10):
     body = None
@@ -344,6 +364,7 @@ grep -Ei \
     echo "prompt_bytes: $(wc -c < "${PROMPT_FILE}")"
     echo "server_bin: ${SERVER_BIN}"
     echo "model: ${MODEL}"
+    echo "server_url: ${SERVER_URL}"
     echo "port: ${PORT}"
     echo "n_predict: ${N_PREDICT}"
     echo
