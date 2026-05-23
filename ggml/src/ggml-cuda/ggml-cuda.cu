@@ -64,6 +64,9 @@
 #include "ggml-cuda/tri.cuh"
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906)
+#include "ggml-cuda/gfx906/matmul/mmf.cuh"
+#endif
 #include "ggml.h"
 
 #include <algorithm>
@@ -1712,12 +1715,24 @@ static void ggml_cuda_op_mul_mat_cublas(
         const auto & force_compute_type = ggml_cuda_cublas_get_force_compute_type();
 
         if (!force_compute_type.fp16 && (GGML_CUDA_CC_IS_CDNA(cc)
+                                        || GGML_CUDA_CC_IS_GCN(cc)
                                         || GGML_CUDA_CC_IS_RDNA4(cc)
                                         || cc == GGML_CUDA_CC_VOLTA
                                         || force_compute_type.fp32))
         {
             const float alpha = 1.0f;
             const float beta = 0.0f;
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906)
+            bool handled = false;
+            if (GGML_CUDA_CC_IS_GCN(cc)) {
+                handled = gfx906_mmf_dispatch(
+                    src0_ptr, src1_ptr, dst_dd_i,
+                    (int) row_diff, (int) src1_ncols, (int) ne10,
+                    (int) ne00, (int) ne10, (int) ldc,
+                    stream);
+            }
+            if (!handled)
+#endif
             CUBLAS_CHECK(
                 cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
                         row_diff, src1_ncols, ne10,
@@ -1768,6 +1783,17 @@ static void ggml_cuda_op_mul_mat_cublas(
         const float beta = 0.0f;
 
         CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906)
+        bool handled = false;
+        if (GGML_CUDA_CC_IS_GCN(cc)) {
+            handled = gfx906_sgemm_dispatch(
+                src0_ddf_i, src1_ddf1_i, dst_dd_i,
+                (int) row_diff, (int) src1_ncols, (int) ne10,
+                (int) ne00, (int) ne10, (int) ldc,
+                stream);
+        }
+        if (!handled)
+#endif
         CUBLAS_CHECK(
             cublasSgemm(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
                     row_diff, src1_ncols, ne10,
@@ -3275,6 +3301,15 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 #endif
             }
         }
+
+#ifdef GGML_USE_HIP
+        if (node->op == GGML_OP_SOLVE_TRI) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to SOLVE_TRI on ROCm\n", __func__);
+#endif
+        }
+#endif
 
         if (!use_cuda_graph) {
             break;
@@ -5417,6 +5452,17 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_TRI:
         case GGML_OP_DIAG:
         case GGML_OP_SOLVE_TRI:
+#if defined(GGML_USE_HIP)
+            {
+                const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
+                if (GGML_CUDA_CC_IS_GCN(cc)) {
+                    if (op->src[0] && op->src[1]) {
+                        return op->src[0]->ne[0] <= 64 && op->src[1]->ne[0] <= 32;
+                    }
+                    return false;
+                }
+            }
+#endif
             return true;
 
         default:

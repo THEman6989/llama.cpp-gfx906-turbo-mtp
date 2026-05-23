@@ -320,6 +320,9 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
     const int * q8 = (const int *) bq8_1->qs + iqs;
 
     int sumi = 0;
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    GFX906_VEC_DOT_MXFP4_Q8_1(bq4, bq8_1, iqs, sumi);
+#else
 #pragma unroll
     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
         const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
@@ -328,6 +331,7 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
         sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
         sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
     }
+#endif
 
     const float d = ggml_cuda_e8m0_to_fp32(bq4->e) * 0.5f * __low2float(bq8_1->ds);
     return d * sumi;
@@ -812,7 +816,11 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
 
 #pragma unroll
     for (int i = 0; i < VDR_Q8_0_Q8_1_MMVQ; ++i) {
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+        v[i] = gfx906_get_int_b2_fast(bq8_0->qs, iqs + i);
+#else
         v[i] = get_int_b2(bq8_0->qs, iqs + i);
+#endif
         u[i] = get_int_b4(bq8_1->qs, iqs + i);
     }
 
