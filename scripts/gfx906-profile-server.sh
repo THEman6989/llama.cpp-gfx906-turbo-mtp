@@ -367,6 +367,7 @@ grep -Ei \
     echo "server_url: ${SERVER_URL}"
     echo "port: ${PORT}"
     echo "n_predict: ${N_PREDICT}"
+    echo "GGML_GFX906_TRACE: ${GGML_GFX906_TRACE:-0}"
     echo
     echo "rocm:"
     if command -v /opt/rocm/bin/hipconfig >/dev/null 2>&1; then

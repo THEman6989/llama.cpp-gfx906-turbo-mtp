@@ -78,6 +78,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cfloat>
+#include <cstring>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -93,6 +94,34 @@ static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
 #define GGML_LOG_WARN_ONCE(str) \
     { static std::once_flag warn_flag; std::call_once(warn_flag, []() { GGML_LOG_WARN(str); }); }
+
+static bool ggml_cuda_gfx906_trace_enabled() {
+    static const bool enabled = []() {
+        const char * env = std::getenv("GGML_GFX906_TRACE");
+        return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+    }();
+
+    return enabled;
+}
+
+static void ggml_cuda_gfx906_trace_log(std::atomic<int> & counter, const char * fmt, ...) {
+    if (!ggml_cuda_gfx906_trace_enabled()) {
+        return;
+    }
+
+    constexpr int trace_limit = 256;
+    if (counter.fetch_add(1, std::memory_order_relaxed) >= trace_limit) {
+        return;
+    }
+
+    char msg[1536];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+
+    GGML_LOG_INFO("gfx906_trace: %s\n", msg);
+}
 
 [[noreturn]]
 void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
@@ -2621,27 +2650,52 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_bf16 = src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
+    auto trace_path = [&](const char * path) {
+        static std::atomic<int> trace_count{0};
+        ggml_cuda_gfx906_trace_log(trace_count,
+            "mul_mat path=%s split=%d bad_padding=%d src0=%s type=%s src1_type=%s dst_type=%s "
+            "src0_ne=(%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ") "
+            "src1_ne=(%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ") "
+            "dst_ne=(%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ") "
+            "flags vec_f=%d mmf=%d vec_q=%d mmq=%d batched_cublas_f16=%d batched_cublas_bf16=%d batched_cublas_f32=%d",
+            path, split, bad_padding_clear, src0->name, ggml_type_name(src0->type), ggml_type_name(src1->type), ggml_type_name(dst->type),
+            src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+            src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+            dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+            use_mul_mat_vec_f, use_mul_mat_f, use_mul_mat_vec_q, use_mul_mat_q,
+            use_batched_cublas_f16, use_batched_cublas_bf16, use_batched_cublas_f32);
+    };
+
     if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
         // but this is only faster for GPUs without tensor cores or with a thin src0 matrix (particularly KQV in attention)
+        trace_path("mul_mat_vec_f");
         ggml_cuda_mul_mat_vec_f(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_f) {
+        trace_path("mul_mat_f");
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_vec_q) {
+        trace_path("mul_mat_vec_q");
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_q) {
+        trace_path("mul_mat_q");
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32)
         && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
         // general KQ + KQV multi-batch without FlashAttention
+        trace_path("batched_cublas");
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
     } else if (use_mul_mat_vec_f) {
+        trace_path("op_mul_mat_vec_f");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_f, nullptr);
     } else if (use_mul_mat_vec_q) {
+        trace_path("op_mul_mat_vec_q");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_q, quantize_row_q8_1_cuda);
     } else if (use_mul_mat_q) {
+        trace_path("op_mul_mat_q");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
     } else {
+        trace_path("op_mul_mat_cublas");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
 }
@@ -2659,6 +2713,21 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
+    auto trace_path = [&](const char * path, int mmvq_mmid_max, bool use_mmq, bool use_mmf) {
+        static std::atomic<int> trace_count{0};
+        ggml_cuda_gfx906_trace_log(trace_count,
+            "mul_mat_id path=%s src0=%s type=%s cc=%d mmvq_mmid_max=%d use_mmq=%d use_mmf=%d "
+            "ne0=%" PRId64 " ne1=%" PRId64 " ne2=%" PRId64 " ne3=%" PRId64 " "
+            "src0_ne=(%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ") "
+            "src1_ne=(%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ") "
+            "ids_ne=(%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ")",
+            path, src0->name, ggml_type_name(src0->type), cc, mmvq_mmid_max, use_mmq, use_mmf,
+            ne0, ne1, ne2, ne3,
+            src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+            src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+            ids->ne[0], ids->ne[1], ids->ne[2], ids->ne[3]);
+    };
+
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
@@ -2666,27 +2735,35 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
             if (ggml_is_quantized(src0->type)) {
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {
+                    trace_path("mul_mat_id_mmvq", mmvq_mmid_max, false, false);
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
                     return;
                 }
             } else {
                 if (GGML_CUDA_CC_IS_AMD(cc)) {
+                    trace_path("mul_mat_id_mmvf", -1, false, false);
                     ggml_cuda_mul_mat_vec_f(ctx, src0, src1, ids, dst);
                     return;
                 }
             }
         }
 
-        if (ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)) {
+        const bool use_mmq = ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02);
+        if (use_mmq) {
+            trace_path("mul_mat_id_mmq", -1, use_mmq, false);
             ggml_cuda_mul_mat_q(ctx, src0, src1, ids, dst);
             return;
         }
 
-        if (ggml_cuda_should_use_mmf(src0->type, cc, WARP_SIZE, src0->ne, src0->nb, src1->ne[2], /*mul_mat_id=*/true)) {
+        const bool use_mmf = ggml_cuda_should_use_mmf(src0->type, cc, WARP_SIZE, src0->ne, src0->nb, src1->ne[2], /*mul_mat_id=*/true);
+        if (use_mmf) {
+            trace_path("mul_mat_id_mmf", -1, use_mmq, use_mmf);
             ggml_cuda_mul_mat_f(ctx, src0, src1, ids, dst);
             return;
         }
     }
+
+    trace_path("mul_mat_id_sorted_fallback", -1, false, false);
 
     // note: this path should not be reached when recording CUDA graphs, because it requires stream synchronization
     // TODO: add asserts to verify this. should work with CUDA, HIP, etc.
