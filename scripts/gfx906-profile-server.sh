@@ -18,6 +18,7 @@ Environment overrides:
   N_PREDICT=256
   START_SERVER=1        # set 0 to use an already-running server
   SAVE_RESPONSE=0       # set 1 to save generated text
+  GGML_GFX906_TRACE=1   # enabled by default when START_SERVER=1
   EXTRA_SERVER_ARGS=""  # appended to llama-server command
 
 What it writes:
@@ -123,6 +124,12 @@ N_PREDICT="${N_PREDICT:-256}"
 START_SERVER="${START_SERVER:-1}"
 SAVE_RESPONSE="${SAVE_RESPONSE:-0}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
+
+if [[ "${START_SERVER}" == "1" ]]; then
+    export GGML_GFX906_TRACE="${GGML_GFX906_TRACE:-1}"
+else
+    GGML_GFX906_TRACE="${GGML_GFX906_TRACE:-0}"
+fi
 
 if [[ "${START_SERVER}" == "1" && ! -x "${SERVER_BIN}" ]]; then
     echo "server binary is not executable: ${SERVER_BIN}" >&2
