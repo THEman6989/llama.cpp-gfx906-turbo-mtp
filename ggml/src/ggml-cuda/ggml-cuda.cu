@@ -119,6 +119,15 @@ static int ggml_cuda_gfx906_trace_limit() {
     return limit;
 }
 
+static bool ggml_cuda_gfx906_trace_path_enabled(const char * path) {
+    static const char * filter = []() {
+        const char * env = std::getenv("GGML_GFX906_TRACE_FILTER");
+        return env != nullptr && env[0] != '\0' ? env : nullptr;
+    }();
+
+    return filter == nullptr || std::strstr(path, filter) != nullptr;
+}
+
 static void ggml_cuda_gfx906_trace_log(std::atomic<int> & counter, const char * fmt, ...) {
     if (!ggml_cuda_gfx906_trace_enabled()) {
         return;
@@ -2670,6 +2679,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
     auto trace_path = [&](const char * path) {
+        if (!ggml_cuda_gfx906_trace_path_enabled(path)) {
+            return;
+        }
+
         static std::atomic<int> trace_count{0};
         ggml_cuda_gfx906_trace_log(trace_count,
             "mul_mat path=%s split=%d bad_padding=%d src0=%s type=%s src1_type=%s dst_type=%s "
@@ -2733,6 +2746,10 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
     auto trace_path = [&](const char * path, int mmvq_mmid_max, bool use_mmq, bool use_mmf) {
+        if (!ggml_cuda_gfx906_trace_path_enabled(path)) {
+            return;
+        }
+
         static std::atomic<int> trace_count{0};
         ggml_cuda_gfx906_trace_log(trace_count,
             "mul_mat_id path=%s src0=%s type=%s cc=%d mmvq_mmid_max=%d use_mmq=%d use_mmf=%d "
