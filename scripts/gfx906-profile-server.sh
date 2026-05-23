@@ -399,6 +399,7 @@ grep -Ei \
     echo "GGML_GFX906_TRACE_FILTER: ${GGML_GFX906_TRACE_FILTER:-}"
     echo "GGML_GFX906_TRACE_LIMIT: ${GGML_GFX906_TRACE_LIMIT:-}"
     echo "GGML_GFX906_TRACE_MAX_NE2: ${GGML_GFX906_TRACE_MAX_NE2:-}"
+    echo "GGML_GFX906_Q8_WARP_COOP_MAX_COLS: ${GGML_GFX906_Q8_WARP_COOP_MAX_COLS:-2048}"
     echo
     echo "rocm:"
     if command -v /opt/rocm/bin/hipconfig >/dev/null 2>&1; then

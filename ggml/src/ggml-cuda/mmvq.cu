@@ -10,9 +10,20 @@
 #include "gfx906/matmul/mmvq-q8_0.cuh"
 #endif
 
+#include <cstdlib>
 #include <cstdint>
 
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
+
+#if defined(GGML_HIP_GFX906)
+static int gfx906_q8_warp_coop_max_cols() {
+    static const int max_cols = []() {
+        const char * env = std::getenv("GGML_GFX906_Q8_WARP_COOP_MAX_COLS");
+        return env ? std::atoi(env) : 2048;
+    }();
+    return max_cols;
+}
+#endif
 
 static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) {
     switch (type) {
@@ -941,7 +952,7 @@ static void mul_mat_vec_q_switch_type(
             {
                 const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
 
-                if (ncols_dst == 1 && !has_fusion && ncols_x <= 1024) {
+                if (ncols_dst == 1 && !has_fusion && ncols_x <= gfx906_q8_warp_coop_max_cols()) {
                     const uint3 nchannels_y_fd   = ids ? init_fastdiv_values(nchannels_y) : make_uint3(0, 0, 0);
                     const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0) : init_fastdiv_values(nchannels_dst / nchannels_x);
                     const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst / nsamples_x);
