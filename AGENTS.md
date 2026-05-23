@@ -9,6 +9,115 @@ AI assistance is permissible only when the majority of the code is authored by a
 
 ---
 
+## Private Fork Rules: GFX906 Turbo MTP
+
+This repository is a private performance fork for AMD GFX906/MI50/MI60. Do not treat it as a clean upstream `llama.cpp` checkout. It contains local performance-critical changes that must survive upstream rebases, cherry-picks, and manual merges.
+
+### Protected Optimization Paths
+
+Do not remove, rewrite, or "clean up" these paths during an upstream update unless the replacement is benchmarked and proven faster on GFX906:
+
+- `ggml/src/ggml-cuda/gfx906/**`
+- `ggml/src/ggml-cuda/gfx906/attention/fattn-q8.cu`
+- `ggml/src/ggml-cuda/gfx906/attention/fattn-q8.cuh`
+- `ggml/src/ggml-cuda/gfx906/attention/instances/*.cu`
+- GFX906 dispatch changes in `ggml/src/ggml-cuda/fattn.cu`
+- GFX906 MMVQ/MMQ dispatch and vecdot changes in `ggml/src/ggml-cuda/mmvq.cu`, `ggml/src/ggml-cuda/mmq.cu`, and `ggml/src/ggml-cuda/vecdotq.cuh`
+- HIP build wiring in `ggml/src/ggml-hip/CMakeLists.txt`
+- CUDA build wiring in `ggml/src/ggml-cuda/CMakeLists.txt`
+- Profiling helper `scripts/gfx906-profile-server.sh`
+
+If an upstream merge conflicts with these files, stop and preserve the local GFX906 behavior first. If preserving it is not straightforward, tell the user that the upstream merge would break the optimized GFX906 path and explain the conflicting files.
+
+### Known Performance-Critical Fix
+
+The main performance regression that took significant time to diagnose was in FlashAttention dispatch for Q8 KV cache on GFX906.
+
+For `unsloth/Qwen3.6-35B-A3B-GGUF:Q8_0`, the model reports:
+
+```text
+key_length   = 256
+value_length = 256
+```
+
+The `256/256` GFX906 Q8 tile kernel already existed, but the dispatcher did not route this model into it. The fix is that Q8 KV cache with `Q->ne[0] <= 256` must reach `BEST_FATTN_KERNEL_TILE_Q8` in `ggml/src/ggml-cuda/fattn.cu`.
+
+Do not revert this back to `<= 128`, and do not replace it with a generic upstream selector unless the Qwen 35B A3B Q8 long-context benchmark still reaches roughly the same generation speed. The known good result after the fix was about `40 tok/s` generation at roughly `120k` context, compared with about `26-27 tok/s` before the dispatch fix.
+
+### Head-Dimension Notes
+
+In this code, "head size" means per-head dimension (`Q->ne[0]`, `key_length`, `value_length`), not the number of attention heads.
+
+Known GFX906 Q8 attention tile instances include:
+
+```text
+40/40, 64/64, 80/80, 96/96, 112/112, 128/128, 256/256, 576/512
+```
+
+Do not blindly widen the Q8 dispatch condition to `<= 512` or `<= 576`. The `576/512` path exists, but it requires matching `K->ne[0] == 576`, `V->ne[0] == 512`, Q8 KV types, and valid GQA/mask conditions. A wrong broad dispatch can select an unsupported tile shape or hit an abort.
+
+### Q4, Q4_1, and MXFP4
+
+Q4_0 and Q4_1 FlashAttention vector paths for `256` head dimension are important too:
+
+- Q4_0/Q4_0 is part of the default FA vector path.
+- Q4_1/Q4_1 must also remain part of the default FA vector path and build sources, even when `GGML_CUDA_FA_ALL_QUANTS=OFF`.
+
+MXFP4 is currently implemented on CUDA/HIP as a weight/matmul quantization path, not as a FlashAttention KV-cache type. Protect MXFP4 matmul support in:
+
+- `ggml/src/ggml-cuda/template-instances/mmq-instance-mxfp4.cu`
+- MXFP4 cases in `ggml/src/ggml-cuda/mmq.cu`
+- MXFP4 cases in `ggml/src/ggml-cuda/mmvq.cu`
+- MXFP4 vecdot support in `ggml/src/ggml-cuda/vecdotq.cuh`
+
+Do not invent an MXFP4 FlashAttention dispatch unless the required FA dequantization and vector functions exist and are benchmarked. If upstream changes MXFP4 handling, check both matmul and MoE/MUL_MAT_ID paths before accepting the merge.
+
+### Required Verification After Updates
+
+After any upstream update or merge touching CUDA/HIP, build with the GFX906 HIP configuration and verify that the protected kernels are still compiled.
+
+Recommended build:
+
+```bash
+env HIP_PATH=/opt/rocm ROCM_PATH=/opt/rocm CMAKE_PREFIX_PATH=/opt/rocm \
+  CPLUS_INCLUDE_PATH=/opt/rocm/include C_INCLUDE_PATH=/opt/rocm/include \
+  HIPCXX=/opt/rocm/lib/llvm/bin/clang++ \
+  cmake -S . -B build -G Ninja \
+    -DGGML_HIP=ON \
+    -DGPU_TARGETS=gfx906 \
+    -DAMDGPU_TARGETS=gfx906 \
+    -DCMAKE_HIP_ARCHITECTURES=gfx906 \
+    -DGGML_HIP_GFX906=ON \
+    -DGGML_HIP_GRAPHS=ON \
+    -DGGML_HIP_MMQ_MFMA=ON \
+    -DGGML_HIP_NO_VMM=ON \
+    -DGGML_BUILD_TESTS=OFF \
+    -DLLAMA_BUILD_UI=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/opt/rocm \
+    "-DCMAKE_CXX_FLAGS=-I/opt/rocm/include" \
+    "-DCMAKE_C_FLAGS=-I/opt/rocm/include" \
+    "-DCMAKE_HIP_FLAGS=-I/opt/rocm/include --offload-arch=gfx906"
+
+env LIBRARY_PATH=/opt/rocm/lib LD_LIBRARY_PATH=/opt/rocm/lib \
+  cmake --build build --target llama-server --parallel "$(nproc)"
+```
+
+For performance checks, use `scripts/gfx906-profile-server.sh`. Clean timing runs should usually use:
+
+```bash
+GGML_GFX906_TRACE=0 SERVER_VERBOSE=0 scripts/gfx906-profile-server.sh /path/to/prompt /tmp/gfx906-check
+```
+
+Important things to check in logs:
+
+- model `key_length` and `value_length`
+- KV cache types, especially `q8_0`
+- generation tokens/s at long context
+- whether trace/log output still shows the expected GFX906 dispatch path when tracing is enabled
+
+---
+
 ## Guidelines for Contributors Using AI
 
 llama.cpp is built by humans, for humans. Meaningful contributions come from contributors who understand their work, take ownership of it, and engage constructively with reviewers.
