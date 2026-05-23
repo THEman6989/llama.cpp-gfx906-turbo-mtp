@@ -19,6 +19,7 @@ Environment overrides:
   N_PARALLEL=1
   START_SERVER=1        # set 0 to use an already-running server
   SAVE_RESPONSE=0       # set 1 to save generated text
+  SERVER_VERBOSE=0      # set 1 to add -v to llama-server
   GGML_GFX906_TRACE=1   # enabled by default when START_SERVER=1
   EXTRA_SERVER_ARGS=""  # appended to llama-server command
 
@@ -125,6 +126,7 @@ N_PREDICT="${N_PREDICT:-256}"
 N_PARALLEL="${N_PARALLEL:-1}"
 START_SERVER="${START_SERVER:-1}"
 SAVE_RESPONSE="${SAVE_RESPONSE:-0}"
+SERVER_VERBOSE="${SERVER_VERBOSE:-0}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
 if [[ "${START_SERVER}" == "1" ]]; then
@@ -206,6 +208,10 @@ server_cmd=(
     --kv-unified
     --cont-batching
 )
+
+if [[ "${SERVER_VERBOSE}" == "1" ]]; then
+    server_cmd+=(-v)
+fi
 
 if [[ -n "${EXTRA_SERVER_ARGS}" ]]; then
     # shellcheck disable=SC2206
@@ -388,6 +394,7 @@ grep -Ei \
     echo "port: ${PORT}"
     echo "n_predict: ${N_PREDICT}"
     echo "n_parallel: ${N_PARALLEL}"
+    echo "server_verbose: ${SERVER_VERBOSE}"
     echo "GGML_GFX906_TRACE: ${GGML_GFX906_TRACE:-0}"
     echo "GGML_GFX906_TRACE_FILTER: ${GGML_GFX906_TRACE_FILTER:-}"
     echo "GGML_GFX906_TRACE_LIMIT: ${GGML_GFX906_TRACE_LIMIT:-}"
