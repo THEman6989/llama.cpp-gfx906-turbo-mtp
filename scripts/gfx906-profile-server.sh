@@ -16,6 +16,7 @@ Environment overrides:
   PORT=8033
   SERVER_URL=http://127.0.0.1:8033
   N_PREDICT=256
+  N_PARALLEL=2
   START_SERVER=1        # set 0 to use an already-running server
   SAVE_RESPONSE=0       # set 1 to save generated text
   GGML_GFX906_TRACE=1   # enabled by default when START_SERVER=1
@@ -121,6 +122,7 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8033}"
 SERVER_URL="${SERVER_URL:-http://127.0.0.1:${PORT}}"
 N_PREDICT="${N_PREDICT:-256}"
+N_PARALLEL="${N_PARALLEL:-2}"
 START_SERVER="${START_SERVER:-1}"
 SAVE_RESPONSE="${SAVE_RESPONSE:-0}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
@@ -190,7 +192,7 @@ server_cmd=(
     --port "${PORT}"
     -ngl 999
     -c 128000
-    -np 2
+    -np "${N_PARALLEL}"
     -fa on
     -sm layer
     -b 512
@@ -383,6 +385,7 @@ grep -Ei \
     echo "server_url: ${SERVER_URL}"
     echo "port: ${PORT}"
     echo "n_predict: ${N_PREDICT}"
+    echo "n_parallel: ${N_PARALLEL}"
     echo "GGML_GFX906_TRACE: ${GGML_GFX906_TRACE:-0}"
     echo
     echo "rocm:"
