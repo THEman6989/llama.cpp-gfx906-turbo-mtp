@@ -99,9 +99,10 @@ static __device__ __forceinline__ void quantize_q8_1_epilogue_32vals(
 static __host__ __forceinline__ size_t get_q8_1_mmq_buffer_size(
     int64_t ncols, int64_t nrows, int cc
 ) {
+    GGML_UNUSED(cc);
     const int64_t ncols_padded = GGML_PAD(ncols, MATRIX_ROW_PADDING);
     const size_t row_size = (ncols_padded / QK8_1) * sizeof(block_q8_1) +
-                            get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
+                            GFX906_MMQ_X_MAX * sizeof(block_q8_1_mmq);
     return nrows * row_size;
 }
 

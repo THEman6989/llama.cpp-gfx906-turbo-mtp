@@ -317,9 +317,7 @@ static __global__ void flash_attn_ext_vec(
 #endif // V_DOT2_F32_F16_AVAILABLE
         }
 
-#ifndef GGML_USE_HIP
-        __syncwarp();
-#endif // GGML_USE_HIP
+        ggml_cuda_syncwarp();
 
 #pragma unroll
         for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {
@@ -540,7 +538,7 @@ void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggm
     const bool need_f16_K = type_K == GGML_TYPE_F16;
     const bool need_f16_V = type_V == GGML_TYPE_F16;
     constexpr size_t nbytes_shared = 0;
-    launch_fattn<D, cols_per_block, 1>(ctx, dst, fattn_kernel, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
+    launch_fattn<D, cols_per_block, 1>(ctx, dst, fattn_kernel, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false, false);
 }
 
 template <int D, ggml_type type_K, ggml_type type_V>
@@ -609,3 +607,18 @@ EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q8_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_BF16)
+
+#define EXTERN_DECL_FATTN_VEC_CUSTOM_CASE(D, type_K, type_V) \
+    extern DECL_FATTN_VEC_CASE(D, type_K, type_V)             \
+
+#define EXTERN_DECL_FATTN_VEC_CUSTOM_CASES(type_K, type_V) \
+    EXTERN_DECL_FATTN_VEC_CUSTOM_CASE( 64, type_K, type_V); \
+    EXTERN_DECL_FATTN_VEC_CUSTOM_CASE(128, type_K, type_V); \
+    EXTERN_DECL_FATTN_VEC_CUSTOM_CASE(256, type_K, type_V); \
+    EXTERN_DECL_FATTN_VEC_CUSTOM_CASE(512, type_K, type_V); \
+
+EXTERN_DECL_FATTN_VEC_CUSTOM_CASES(GGML_TYPE_TURBO3_0, GGML_TYPE_F16)
+EXTERN_DECL_FATTN_VEC_CUSTOM_CASES(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
+EXTERN_DECL_FATTN_VEC_CUSTOM_CASES(GGML_TYPE_TURBO3_0, GGML_TYPE_Q8_0)
+EXTERN_DECL_FATTN_VEC_CUSTOM_CASES(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
+EXTERN_DECL_FATTN_VEC_CUSTOM_CASES(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)

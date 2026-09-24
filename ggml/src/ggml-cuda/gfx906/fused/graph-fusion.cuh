@@ -153,18 +153,18 @@ static inline bool try_rms_mul_mmq_fusion(
     if (use_cuda_graph && cuda_graph_update_required) {
         return false;
     }
-    
+
     // Check if the MUL output is a cache candidate (multi-consumer)
     // If so, we need to store in the main cache for proper lookup
     const ggml_tensor* mul_output = decision.mul_node;
     ggml_tensor* rms_norm = cgraph->nodes[node_idx];
-    
+
     // DIAGNOSTIC: Check both tensors to see which one matches
     bool mul_is_candidate = cuda_ctx->q8_cache.is_cache_candidate(mul_output, 0);
     bool rms_is_candidate = cuda_ctx->q8_cache.is_cache_candidate(rms_norm, 0);
-    
 
-    
+
+
     // Current behavior: check MUL output (possibly wrong?)
     bool is_multi_consumer = mul_is_candidate;
     // Alternative: should we check RMS_NORM output instead?
@@ -184,7 +184,7 @@ static inline bool try_rms_mul_mmq_fusion(
         // Arena full - cannot fuse
         return false;
     }
-    
+
     char* buffer_ptr = static_cast<char*>(arena_ptr);
 
     // Store dimensions for MMQ consumers
@@ -205,11 +205,11 @@ static inline bool try_rms_mul_mmq_fusion(
     if (is_multi_consumer) {
         // Get layout from decision
         int layout = static_cast<int>(decision.ds_layout);
-        
+
         // DEBUG: Log what we're storing
-        fprintf(stderr, "[FUSION STORE] '%s' (layer=%d) in slot for MMQ lookup\n", 
+        fprintf(stderr, "[FUSION STORE] '%s' (layer=%d) in slot for MMQ lookup\n",
                 mul_output->name, cuda_ctx->q8_cache.get_layer_from_tensor(mul_output));
-        
+
         // Store in cache with proper dimensions
         cuda_ctx->q8_cache.store(mul_output, layout, buffer_ptr, q8_buffer_size,
                                   info.ne10, info.ne11, info.ne12, info.ne13);

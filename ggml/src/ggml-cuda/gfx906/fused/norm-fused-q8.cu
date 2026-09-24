@@ -256,7 +256,8 @@ void ggml_cuda_op_rms_norm_fused_q8_1(
 }
 
 size_t ggml_cuda_get_q8_1_buffer_size(int64_t ncols, int64_t nrows, int cc) {
+    GGML_UNUSED(cc);
     const int64_t ncols_padded = GGML_PAD(ncols, MATRIX_ROW_PADDING);
     const int64_t blocks_per_row = ncols_padded / (4 * QK8_1);
-    return nrows * blocks_per_row * sizeof(block_q8_1_mmq) + get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
+    return nrows * blocks_per_row * sizeof(block_q8_1_mmq) + GFX906_MMQ_X_MAX * sizeof(block_q8_1_mmq);
 }

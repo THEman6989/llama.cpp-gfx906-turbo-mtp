@@ -408,10 +408,24 @@ void quantize_row_turbo2_0_ref(const float * GGML_RESTRICT x, block_turbo2_0 * G
     assert(k % QK_TURBO2 == 0);
     const int nb = k / QK_TURBO2;
     for (int i = 0; i < nb; i++) {
+        const float * xb = x + i * QK_TURBO2;
         float norm = 0.0f;
-        for (int j = 0; j < QK_TURBO2; j++) norm += x[i*QK_TURBO2 + j] * x[i*QK_TURBO2 + j];
-        y[i].norm = GGML_FP32_TO_FP16(sqrtf(norm));
-        memset(y[i].qs, 0, QK_TURBO2 / 4);
+        for (int j = 0; j < QK_TURBO2; j++) {
+            norm += xb[j] * xb[j];
+        }
+        norm = sqrtf(norm);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+
+        if (norm < 1e-10f) {
+            continue;
+        }
+
+        const float inv_norm = 1.0f / norm;
+        for (int j = 0; j < QK_TURBO2; j++) {
+            const uint8_t idx = (uint8_t) nearest_centroid_2bit(xb[j] * inv_norm);
+            y[i].qs[j / 4] |= idx << ((j % 4) * 2);
+        }
     }
 }
 
@@ -441,4 +455,44 @@ size_t quantize_turbo2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT d
         );
     }
     return nrows * row_size;
+}
+
+typedef void (* turbo_dequantize_t)(const void * GGML_RESTRICT, float * GGML_RESTRICT, int64_t);
+
+static void ggml_vec_dot_turbo_f32(
+        int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx,
+        const void * GGML_RESTRICT vy, size_t by,
+        int nrc, int qk, size_t block_size, turbo_dequantize_t dequantize) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    assert(n % qk == 0);
+
+    const float * y = vy;
+    const char * x = vx;
+    float values[TURBO_D];
+    float sum = 0.0f;
+
+    for (int ib = 0; ib < n / qk; ++ib) {
+        dequantize(x + ib * block_size, values, qk);
+        for (int i = 0; i < qk; ++i) {
+            sum += values[i] * y[ib * qk + i];
+        }
+    }
+
+    *s = sum;
+}
+
+void ggml_vec_dot_turbo2_0_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_turbo_f32(n, s, bs, vx, bx, vy, by, nrc, QK_TURBO2, sizeof(block_turbo2_0), (turbo_dequantize_t) dequantize_row_turbo2_0);
+}
+
+void ggml_vec_dot_turbo3_0_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_turbo_f32(n, s, bs, vx, bx, vy, by, nrc, QK_TURBO3, sizeof(block_turbo3_0), (turbo_dequantize_t) dequantize_row_turbo3_0);
+}
+
+void ggml_vec_dot_turbo4_0_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_turbo_f32(n, s, bs, vx, bx, vy, by, nrc, QK_TURBO4, sizeof(block_turbo4_0), (turbo_dequantize_t) dequantize_row_turbo4_0);
 }

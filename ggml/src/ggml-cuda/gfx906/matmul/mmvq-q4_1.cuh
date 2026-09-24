@@ -23,8 +23,8 @@ static __global__ void gfx906_mul_mat_vec_q4_1_warp_coop(
     constexpr int qk_q4_1 = 32;
 
     const int lane_id = threadIdx.x;
-    const int half_lane = lane_id % 32;      
-    const int row_offset = lane_id / 32;     
+    const int half_lane = lane_id % 32;
+    const int row_offset = lane_id / 32;
     const int row = blockIdx.x * 2 + row_offset;
 
     if (row >= (int)nrows_x) return;
@@ -46,7 +46,7 @@ static __global__ void gfx906_mul_mat_vec_q4_1_warp_coop(
 
     for (int ib = half_lane; ib < blocks_per_row; ib += 32) {
         const block_q4_1 * bq4 = x + ib;
-        const block_q8_1 * bq8 = y + ib;  
+        const block_q8_1 * bq8 = y + ib;
 
         // Load ALL 16 bytes of Q4_1 quantized values (32 nibbles = 32 values)
         int v0, v1, v2, v3;
@@ -119,4 +119,3 @@ static void gfx906_launch_mul_mat_vec_q4_1_warp_coop(
 }
 
 #endif // GGML_USE_HIP
- 

@@ -267,7 +267,7 @@ template<typename Op>
 static __device__ __forceinline__ float warp_reduce_8_amd_f32(float x) {
     // 8-thread reduction tree: xor4 -> xor2 -> xor1
     x = Op::apply(x, hip_shuffle_xor4_f32(x));  // Reduce 8->4
-    x = Op::xor2(x);                             // Reduce 4->2  
+    x = Op::xor2(x);                             // Reduce 4->2
     x = Op::xor1(x);                             // Reduce 2->1
     return x;
 }
